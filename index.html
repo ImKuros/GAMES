@@ -1,1 +1,377 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Anny Platformer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1e1e1e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    font-family: Arial, sans-serif;
+    color: #fff;
+  }
+  canvas {
+    border: 3px solid #000;
+    background: #5c94fc;
+    image-rendering: pixelated;
+  }
+  #overlay {
+    position: absolute;
+    text-align: center;
+    display: none;
+  }
+  button {
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="800" height="450"></canvas>
+
+<div id="overlay">
+  <h1 id="overlayText"></h1>
+  <button onclick="location.reload()">Restart</button>
+</div>
+
+<script>
+/* =========================
+   CONSTANTES
+========================= */
+const TILE_SIZE = 32;
+const GRAVITY = 2000;
+
+/* =========================
+   INPUT MANAGER
+========================= */
+class Input {
+  constructor() {
+    this.keys = new Set();
+    this.pressed = new Set();
+
+    window.addEventListener('keydown', e => {
+      if (!this.keys.has(e.code)) this.pressed.add(e.code);
+      this.keys.add(e.code);
+    });
+
+    window.addEventListener('keyup', e => {
+      this.keys.delete(e.code);
+    });
+  }
+
+  isDown(key) {
+    return this.keys.has(key);
+  }
+
+  justPressed(key) {
+    return this.pressed.has(key);
+  }
+
+  update() {
+    this.pressed.clear();
+  }
+}
+
+/* =========================
+   CAMERA
+========================= */
+class Camera {
+  constructor(width, height, mapWidth) {
+    this.x = 0;
+    this.width = width;
+    this.mapWidth = mapWidth;
+  }
+
+  follow(target, dt) {
+    const targetX = target.x - this.width / 2 + target.width / 2;
+    this.x += (targetX - this.x) * 5 * dt;
+
+    this.x = Math.max(0, Math.min(this.x, this.mapWidth - this.width));
+  }
+}
+
+/* =========================
+   ENTITY BASE
+========================= */
+class Entity {
+  constructor(x, y, w, h) {
+    this.x = x;
+    this.y = y;
+    this.width = w;
+    this.height = h;
+    this.vx = 0;
+    this.vy = 0;
+    this.dead = false;
+  }
+
+  get bounds() {
+    return {
+      left: this.x,
+      right: this.x + this.width,
+      top: this.y,
+      bottom: this.y + this.height
+    };
+  }
+
+  intersects(other) {
+    return !(
+      this.bounds.right < other.bounds.left ||
+      this.bounds.left > other.bounds.right ||
+      this.bounds.bottom < other.bounds.top ||
+      this.bounds.top > other.bounds.bottom
+    );
+  }
+}
+
+/* =========================
+   TILEMAP
+========================= */
+class TileMap {
+  constructor(map) {
+    this.map = map;
+    this.width = map[0].length * TILE_SIZE;
+    this.height = map.length * TILE_SIZE;
+  }
+
+  isSolid(tx, ty) {
+    return this.map[ty] && this.map[ty][tx] === 1;
+  }
+
+  draw(ctx, camera) {
+    ctx.fillStyle = "#654321";
+    for (let y = 0; y < this.map.length; y++) {
+      for (let x = 0; x < this.map[y].length; x++) {
+        if (this.map[y][x] === 1) {
+          ctx.fillRect(
+            x * TILE_SIZE - camera.x,
+            y * TILE_SIZE,
+            TILE_SIZE,
+            TILE_SIZE
+          );
+        }
+      }
+    }
+  }
+}
+
+/* =========================
+   PLAYER (ANNY)
+========================= */
+class Player extends Entity {
+  constructor(x, y) {
+    super(x, y, 28, 28);
+    this.speed = 600;
+    this.accel = 4000;
+    this.friction = 3000;
+    this.jumpForce = 700;
+    this.onGround = false;
+    this.state = "IDLE";
+    this.lives = 3;
+    this.score = 0;
+  }
+
+  update(dt, input, map) {
+    // Horizontal
+    if (input.isDown("ArrowRight") || input.isDown("KeyD")) {
+      this.vx += this.accel * dt;
+    } else if (input.isDown("ArrowLeft") || input.isDown("KeyA")) {
+      this.vx -= this.accel * dt;
+    } else {
+      if (this.vx > 0) this.vx -= this.friction * dt;
+      if (this.vx < 0) this.vx += this.friction * dt;
+    }
+
+    this.vx = Math.max(-this.speed, Math.min(this.vx, this.speed));
+
+    // Jump
+    if (this.onGround && (input.justPressed("Space") || input.justPressed("ArrowUp") || input.justPressed("KeyW"))) {
+      this.vy = -this.jumpForce;
+      this.onGround = false;
+    }
+
+    // Gravity
+    this.vy += GRAVITY * dt;
+
+    this.move(dt, map);
+  }
+
+  move(dt, map) {
+    // Horizontal collision
+    this.x += this.vx * dt;
+    this.collide(map, true);
+
+    // Vertical collision
+    this.y += this.vy * dt;
+    this.onGround = false;
+    this.collide(map, false);
+  }
+
+  collide(map, horizontal) {
+    const tilesX = [
+      Math.floor(this.x / TILE_SIZE),
+      Math.floor((this.x + this.width) / TILE_SIZE)
+    ];
+    const tilesY = [
+      Math.floor(this.y / TILE_SIZE),
+      Math.floor((this.y + this.height) / TILE_SIZE)
+    ];
+
+    for (let y of tilesY) {
+      for (let x of tilesX) {
+        if (map.isSolid(x, y)) {
+          if (horizontal) {
+            if (this.vx > 0) this.x = x * TILE_SIZE - this.width;
+            else if (this.vx < 0) this.x = (x + 1) * TILE_SIZE;
+            this.vx = 0;
+          } else {
+            if (this.vy > 0) {
+              this.y = y * TILE_SIZE - this.height;
+              this.onGround = true;
+            } else if (this.vy < 0) {
+              this.y = (y + 1) * TILE_SIZE;
+            }
+            this.vy = 0;
+          }
+        }
+      }
+    }
+  }
+
+  draw(ctx, camera) {
+    ctx.fillStyle = "#ff69b4";
+    ctx.fillRect(this.x - camera.x, this.y, this.width, this.height);
+  }
+}
+
+/* =========================
+   ENEMY
+========================= */
+class Goomba extends Entity {
+  constructor(x, y) {
+    super(x, y, 28, 28);
+    this.vx = -100;
+  }
+
+  update(dt, map) {
+    this.vy += GRAVITY * dt;
+    this.x += this.vx * dt;
+    this.collide(map, true);
+    this.y += this.vy * dt;
+    this.collide(map, false);
+  }
+
+  collide(map, horizontal) {
+    const tx = Math.floor((this.x + this.width / 2) / TILE_SIZE);
+    const ty = Math.floor((this.y + this.height) / TILE_SIZE);
+
+    if (!map.isSolid(tx, ty + 1)) {
+      this.vx *= -1;
+    }
+
+    if (map.isSolid(tx, ty)) {
+      this.vx *= -1;
+    }
+  }
+
+  draw(ctx, camera) {
+    ctx.fillStyle = "#8b4513";
+    ctx.fillRect(this.x - camera.x, this.y, this.width, this.height);
+  }
+}
+
+/* =========================
+   GAME
+========================= */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const input = new Input();
+
+const mapData = Array.from({ length: 15 }, (_, y) =>
+  Array.from({ length: 100 }, (_, x) => (y === 14 || (y === 10 && x % 10 === 0)) ? 1 : 0)
+);
+
+const map = new TileMap(mapData);
+const player = new Player(100, 100);
+const enemies = [
+  new Goomba(600, 100),
+  new Goomba(1200, 100),
+  new Goomba(2000, 100)
+];
+
+const camera = new Camera(canvas.width, canvas.height, map.width);
+
+let lastTime = 0;
+let gameOver = false;
+let win = false;
+
+/* =========================
+   LOOP
+========================= */
+function loop(time) {
+  const dt = (time - lastTime) / 1000;
+  lastTime = time;
+
+  update(dt);
+  render();
+
+  if (!gameOver && !win) requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  input.update();
+  player.update(dt, input, map);
+  camera.follow(player, dt);
+
+  enemies.forEach(enemy => {
+    enemy.update(dt, map);
+
+    if (!enemy.dead && player.intersects(enemy)) {
+      if (player.vy > 0) {
+        enemy.dead = true;
+        player.vy = -400;
+        player.score += 100;
+      } else {
+        player.lives--;
+        player.x = 100;
+        player.y = 100;
+        if (player.lives < 0) endGame(false);
+      }
+    }
+  });
+
+  if (player.x > map.width - 100) endGame(true);
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  map.draw(ctx, camera);
+  player.draw(ctx, camera);
+  enemies.filter(e => !e.dead).forEach(e => e.draw(ctx, camera));
+
+  // HUD
+  ctx.fillStyle = "#fff";
+  ctx.fillText("Vidas: " + player.lives, 20, 20);
+  ctx.fillText("Score: " + player.score, 20, 40);
+}
+
+function endGame(victory) {
+  gameOver = true;
+  win = victory;
+  document.getElementById("overlay").style.display = "block";
+  document.getElementById("overlayText").innerText =
+    victory ? "Vitória!" : "Game Over";
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
 
